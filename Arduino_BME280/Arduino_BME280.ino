@@ -1,8 +1,8 @@
 /* 
  * @title WeatherData
  * @author MisterL_v
- * @version 1.4 (inkl. Device-Specific Informations)
- * @date 03/2021
+ * @version 1.5 (inkl. developer mode and configuration mode)
+ * @date 06/2021
  * 
 */
 
@@ -22,6 +22,19 @@
 #include <Adafruit_BME280.h>
 #include <ArduinoJson.h>
 
+// Board Functions
+#define CONFIGURATION_MODE true
+#define DEVELOPER_MODE true
+#define RESTART_CONFIGURATION false
+#define BUZZER D8
+#define RED_LED D5
+#define GREEN_LED D4
+#define BLUE_LED D3
+#define DELAY_ALERT 10000 // Time to wait between report and continuing
+#define LED_BLINK 500 // LED blink frequency 
+#define DURATION_SETUP 2000 // frequency to test every component in setup.
+#define WIFI_TIMEOUT 300000
+
 // Device-Specific
 long d_id;
 String d_pin;
@@ -32,16 +45,6 @@ String d_status;
 long d_baudrate;
 long d_transmission;
 
-// Board Functions
-#define CONFIGURATION_MODE true
-#define DEVELOPER_MODE true
-#define RESTART_CONFIGURATION false
-#define BUZZER D8
-#define RED_LED D5
-#define GREEN_LED D4
-#define BLUE_LED D3
-#define DELAY_ALERT 10000
-
 // BME-280-Sensor
 Adafruit_BME280 bme;
 float w_temperature;
@@ -49,7 +52,6 @@ float w_pressure;
 float w_humidity;
 
 // WiFi-Access
-#define WIFI_TIMEOUT 300000
 String ssid;     
 String password;
 
@@ -69,6 +71,8 @@ void setup() {
   set_rgb_led("off");
   load_settings();
   Serial.begin(d_baudrate);
+  device_components();
+  set_rgb_led("green");
   delay(5000);
   Serial.println("Booting and Initializing Datakrash-Board.");
   post_device_informations();
@@ -80,7 +84,8 @@ void setup() {
 }
 
 // Program Loop
-void loop() { 
+void loop() {
+  device_status(); 
   printValues();
   store_sensor_data();
   deepsleep();
@@ -95,10 +100,10 @@ void connect_to_network() {
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) { // Verbindungsaufbau
     set_rgb_led("green");
-    delay(500);
+    delay(LED_BLINK);
     set_rgb_led("off");
     Serial.print(".");
-    delay(500);
+    delay(LED_BLINK);
     Serial.print(".");
     int connection_time = millis();
     if (connection_time >= WIFI_TIMEOUT) {
@@ -178,19 +183,42 @@ void store_sensor_data() {
   Serial.print("Requesting URL: ");
   Serial.println(url);
   client.print(String("GET ") + url + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n"); // Daten werden per GET-Befehl an Server übergeben
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000){
-      Serial.println(">>> Client Timeout !");
-      client.stop(); return; 
-      } 
+  // Check HTTP status
+  char status[32] = {0};
+  client.readBytesUntil('\r', status, sizeof(status));
+  if (strcmp(status, "HTTP/1.1 200 OK") != 0) {
+    set_rgb_led("red");
+    Serial.print(F("Unexpected response: "));
+    Serial.println(status);
   }
-  while (client.available())
-  { 
-    String line = client.readStringUntil('\r'); Serial.print(line);
+
+  // Skip HTTP headers
+  char endOfHeaders[] = "\r\n\r\n";
+  if (!client.find(endOfHeaders)) {
+    set_rgb_led("red");
+    Serial.println(F("Invalid response"));
   }
-  Serial.println();
-  client.stop();
+  DynamicJsonDocument doc(192);
+  // Parse JSON object
+  DeserializationError error = deserializeJson(doc, client);
+  if (error) {
+    set_rgb_led("red");
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.c_str());
+    store_report("415","Es%20ist%20ein%20Fehler%20bei%20der%20Deserialisierung%20von%20JSON-Objekten%20aufgetreten.");
+    delay(DELAY_ALERT);
+    return;
+  }
+  bool operation_done = doc["operation_done"]; // true
+  if (operation_done == true) {
+    set_rgb_led("green");
+    Serial.println("Added new sensor data sucessfully");  
+  } else {
+    set_rgb_led("red");
+    Serial.println("Error while adding new sensor data");  
+  }
+  delay(DELAY_ALERT);
+  return;
 }
 
 // Deepsleep to save energy and ressources
@@ -198,7 +226,9 @@ void deepsleep() {
   Serial.println("[Deep Sleep]");
   Serial.println("Going to deep sleep. Good Night!");
   Serial.println("Automatic awake in " + String(d_transmission) + " Seconds");
+  set_rgb_led("off");
   ESP.deepSleep(d_transmission * 1000000);
+  set_rgb_led("off");
   yield();
 }
 
@@ -265,8 +295,10 @@ void configuration_mode () {
     client.connect(host, httpPort);
     delay(10000);
     if (!client.connect(host, httpPort)) {
-    Serial.println("connection failed");
-    return;
+      set_rgb_led("red");
+      Serial.println("connection failed");
+      delay(DELAY_ALERT);
+      return;
     }
     Serial.print("Requesting URL: ");
     String path_device_informations = "/api/informations/device_informations.php";
@@ -286,8 +318,8 @@ void configuration_mode () {
     // Skip HTTP headers
     char endOfHeaders[] = "\r\n\r\n";
     if (!client.find(endOfHeaders)) {
-      Serial.println(F("Invalid response"));
       set_rgb_led("red");
+      Serial.println(F("Invalid response"));
       store_report("415","Ungültige%20Antwort%20des%20Servers.");
       delay(DELAY_ALERT);
       return;
@@ -296,35 +328,35 @@ void configuration_mode () {
     // Parse JSON object
     DeserializationError error = deserializeJson(doc, client);
     if (error) {
+      set_rgb_led("red");
       Serial.print(F("deserializeJson() failed: "));
       Serial.println(error.c_str());
-      set_rgb_led("red");
       store_report("415","Es%20ist%20ein%20Fehler%20bei%20der%20Deserialisierung%20von%20JSON-Objekten%20aufgetreten.");
       delay(DELAY_ALERT);
       return;
     }
-    bool operation_done = doc["operation_done"]; // true
-    String error_reason = doc["error_reason"]; // ""
+    bool operation_done = doc["operation_done"];
+    String error_reason = doc["error_reason"];
     boolean deserialized_d_dev_mode = doc["d_dev_mode"];
     d_dev_mode = deserialized_d_dev_mode; 
-    int deserialized_d_id = doc["device_id"]; // "2"
+    int deserialized_d_id = doc["device_id"]; 
     d_id = deserialized_d_id;
-    String deserialized_d_hostname = doc["d_name"]; // "Wetterstation-2"
+    String deserialized_d_hostname = doc["d_name"]; 
     d_hostname = deserialized_d_hostname;
-    String deserialized_d_status = doc["d_status"]; // "online"
+    String deserialized_d_status = doc["d_status"]; 
     d_status = deserialized_d_status;
-    String deserialized_d_wifi_ssid = doc["d_wifi_ssid"]; // "online"
+    String deserialized_d_wifi_ssid = doc["d_wifi_ssid"]; 
     ssid = deserialized_d_wifi_ssid;
-    String deserialized_d_wifi_password = doc["d_wifi_password"]; // "online"
+    String deserialized_d_wifi_password = doc["d_wifi_password"]; 
     password = deserialized_d_wifi_password;
-    long deserialized_d_baudrate = doc["d_baudrate"]; // "115200"
+    long deserialized_d_baudrate = doc["d_baudrate"];
     d_baudrate = deserialized_d_baudrate;
-    int deserialized_d_transmission = doc["d_transmission"]; // "1800"
+    int deserialized_d_transmission = doc["d_transmission"]; 
     d_transmission = deserialized_d_transmission;
     if (operation_done == true) {
       set_rgb_led("green");
       update_device_informations();
-      Serial.println("Automatic Device Configuration was successfully.");
+      Serial.println("Asked new configuration informations successfully.");
     } else {
       set_rgb_led("red");
       Serial.println("Automatic Device Configuration Error.");
@@ -333,6 +365,7 @@ void configuration_mode () {
       store_report("449","Abfrage%20der%20Geräteinformationen%20ist%20fehlgeschlagen."); 
     }
     if (RESTART_CONFIGURATION == true) {
+      set_rgb_led("blue");
       Serial.println("Restarting System to release Configuration");
       delay(DELAY_ALERT);
       ESP.restart();
@@ -372,6 +405,7 @@ void post_device_informations() {
 }
 
 void update_device_informations() {
+  Serial.println("[Updating Device Informations]");
   EEPROM.write(1, d_dev_mode);
   eepromWriteString(2, d_status);
   eepromWriteLong(10, d_id);
@@ -394,7 +428,7 @@ void eepromWriteString(char add,String data)
   {
     EEPROM.write(add+i,data[i]);
   }
-  EEPROM.write(add+_size,'\0');   //Add termination null character for String Data
+  EEPROM.write(add+_size,'\0');   
   EEPROM.commit();
 }
 
@@ -406,7 +440,7 @@ String eepromReadString(char add)
   int len=0;
   unsigned char k;
   k=EEPROM.read(add);
-  while(k != '\0' && len<500)   //Read until null character
+  while(k != '\0' && len<500)   
   {    
     k=EEPROM.read(add+len);
     data[len]=k;
@@ -420,7 +454,7 @@ void eepromWriteInt(int adr, int wert) {
   byte low, high;
   low=wert&0xFF;
   high=(wert>>8)&0xFF;
-  EEPROM.write(adr, low); // dauert 3,3ms 
+  EEPROM.write(adr, low); 
   EEPROM.write(adr+1, high);
   return;
 } 
@@ -446,4 +480,36 @@ long eepromReadLong(int address)
          ((long)EEPROM.read(address + 1) << 16) +
          ((long)EEPROM.read(address + 2) << 8) +
          (long)EEPROM.read(address + 3);
+}
+
+void device_status() {
+  Serial.println("[Device Status]");
+  if (d_status == "offline") {
+    Serial.println("Currently your device is set offline");
+    Serial.println("Please update your device configuration and your device too");
+    while(true) {
+      set_rgb_led("red");
+      delay(LED_BLINK);
+      set_rgb_led("off");
+      delay(LED_BLINK);
+    }
+  } else {
+    Serial.println("Device Status is set online");
+    set_rgb_led("green");
+  }
+}
+
+void device_components() {
+  if (d_dev_mode == true) {
+    tone(BUZZER, 100, DURATION_SETUP);
+    delay(DURATION_SETUP);
+    set_rgb_led("red");
+    delay(DURATION_SETUP);
+    set_rgb_led("green");
+    delay(DURATION_SETUP);
+    set_rgb_led("blue");
+    delay(DURATION_SETUP);
+    set_rgb_led("off");
+    delay(DURATION_SETUP);
+  }    
 }
