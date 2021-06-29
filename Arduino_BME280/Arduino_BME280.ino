@@ -1,17 +1,22 @@
 /* 
- * @title WeatherData
+ * @title Datakrash-Board V.2 (BME280)s
  * @author MisterL_v
- * @version 1.5 (inkl. developer mode and configuration mode)
+ * @version 1.6 (inkl. optional automatically updates)
  * @date 06/2021
  * 
 */
 
-// Before you run this code, you have to change all Device-Specific, Sever- and WiFi-Variables!
+/*  
+ *                    Before you run this code
+ *    1. Change all Board-Functional settings
+ *    2. Make sure your device has the right configuration settings on the Datakrash-Website
+ *    3. Finally you have to add Wifi- and Password- informations in the Access Point and the configuration mode
+*/
 
 /*
- * BME-280 Wiring:
- * VIN        GND       SCL       SDA
- * Red        black    green     yellow
+ *                        BME-280 Wiring
+ *|     VIN      |     GND     |     SCL     |     SDA      |
+ *|     Red      |    Black    |    Green    |    Yellow    |
 */
 
 // Librarys
@@ -23,13 +28,17 @@
 #include <ArduinoJson.h>
 
 // Board Functions
-#define CONFIGURATION_MODE true
-#define DEVELOPER_MODE true
+#define CONFIGURATION_MODE false
+#define DEVELOPER_MODE false
 #define RESTART_CONFIGURATION false
+#define DEVICE_AUTOMATIC_UPDATES false
 #define BUZZER D8
+#define BUTTON D6
 #define RED_LED D5
 #define GREEN_LED D4
 #define BLUE_LED D3
+#define EEPROM_BEGIN 512
+#define SERVER_TIMEOUT 10000
 #define DELAY_ALERT 10000 // Time to wait between report and continuing
 #define LED_BLINK 500 // LED blink frequency 
 #define DURATION_SETUP 2000 // frequency to test every component in setup.
@@ -44,6 +53,8 @@ boolean d_dev_mode;
 String d_status;
 long d_baudrate;
 long d_transmission;
+boolean d_automatic_updates;
+boolean automatic_update;
 
 // BME-280-Sensor
 Adafruit_BME280 bme;
@@ -60,6 +71,8 @@ const char* host = "www.datakrash.net"; // example: raspberrypi
 const uint16_t httpPort = 80;
 String path = "/api/weatherdata/addsensordata.php"; // example: /api/data/addsensor.php
 String path_reports = "/api/reports/addreport.php";
+String path_device_informations = "/api/informations/device_informations.php";
+String path_updates = "/api/informations/device_updates.php";
 
 WiFiClient client;
 
@@ -69,6 +82,7 @@ void setup() {
   pinMode(GREEN_LED, OUTPUT);
   pinMode(BLUE_LED, OUTPUT);
   set_rgb_led("off");
+  EEPROM.begin(EEPROM_BEGIN);
   load_settings();
   Serial.begin(d_baudrate);
   device_components();
@@ -78,6 +92,7 @@ void setup() {
   post_device_informations();
   delay(5000);
   connect_to_network();
+  automatic_updates();
   configuration_mode();
   initialize_sensor();
   Serial.println("Completed Board-Setup.");
@@ -174,7 +189,7 @@ void printValues() {
 void store_sensor_data() {
   Serial.println("[Saving new sensor data.]");
   client.connect(host, httpPort);
-  delay(10000);
+  delay(SERVER_TIMEOUT);
   if (!client.connect(host, httpPort)) {
   Serial.println("connection failed");
   return;
@@ -261,7 +276,7 @@ void store_report(String error_values, String error_details) {
   Serial.println("[Saving a new report]");
   String url_reports = String(path_reports) + "?" + "d_id=" + String(d_id) + "&d_pin=" + String(d_pin) + "&a_token=" + String(a_token) + "&r_errorcode=" + String(error_values) + "&r_details=" + String(error_details);
   client.connect(host, httpPort);
-    delay(10000);
+    delay(SERVER_TIMEOUT);
     if (!client.connect(host, httpPort)) {
       Serial.println("connection failed");
       return;
@@ -289,11 +304,12 @@ void store_report(String error_values, String error_details) {
 }
 
 void configuration_mode () {
-  if (CONFIGURATION_MODE == true) {
+  int buttonState = digitalRead(BUTTON);
+  if (CONFIGURATION_MODE == true || automatic_update == true || buttonState == 1) {
     Serial.println("[Configuration Mode]");
     set_rgb_led("blue");
     client.connect(host, httpPort);
-    delay(10000);
+    delay(SERVER_TIMEOUT);
     if (!client.connect(host, httpPort)) {
       set_rgb_led("red");
       Serial.println("connection failed");
@@ -301,7 +317,6 @@ void configuration_mode () {
       return;
     }
     Serial.print("Requesting URL: ");
-    String path_device_informations = "/api/informations/device_informations.php";
     String url_device_informations = String(path_device_informations) + "?" + "d_id=" + String(d_id) + "&d_pin=" + String(d_pin) + "&a_token=" + String(a_token);
     Serial.println(url_device_informations);
     client.print(String("GET ") + url_device_informations + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n"); // Daten werden per GET-Befehl an Server übergeben
@@ -353,6 +368,8 @@ void configuration_mode () {
     d_baudrate = deserialized_d_baudrate;
     int deserialized_d_transmission = doc["d_transmission"]; 
     d_transmission = deserialized_d_transmission;
+    boolean deserialized_d_automatic_updates = doc["d_automatic_updates"];
+    d_automatic_updates = deserialized_d_automatic_updates; 
     if (operation_done == true) {
       set_rgb_led("green");
       update_device_informations();
@@ -375,7 +392,6 @@ void configuration_mode () {
 }
 
 void load_settings() {
-  EEPROM.begin(512);
   d_dev_mode = EEPROM.read(1);
   d_status = eepromReadString(2);
   d_id = eepromReadLong(10);
@@ -383,6 +399,7 @@ void load_settings() {
   d_hostname = eepromReadString(40);
   d_baudrate = eepromReadLong(70);
   d_transmission = eepromReadLong(90);
+  d_automatic_updates = EEPROM.read(100);
   ssid = eepromReadString(110);
   password = eepromReadString(150);
   a_token = eepromReadString(190);
@@ -402,6 +419,8 @@ void post_device_informations() {
   Serial.print("Transmission: ");
   Serial.println(d_transmission);
   Serial.println("SSID: " + ssid);
+  Serial.print("Automatic Updates: ");
+  Serial.println(d_automatic_updates);
 }
 
 void update_device_informations() {
@@ -413,6 +432,7 @@ void update_device_informations() {
   eepromWriteString(40, d_hostname);
   eepromWriteLong(70, d_baudrate);
   eepromWriteLong(90, d_transmission);
+  EEPROM.write(100, d_automatic_updates);
   eepromWriteString(110, ssid);
   eepromWriteString(150, password);
   eepromWriteString(190, a_token);
@@ -512,4 +532,72 @@ void device_components() {
     set_rgb_led("off");
     delay(DURATION_SETUP);
   }    
+}
+
+void automatic_updates () {
+  if (d_automatic_updates == true || DEVICE_AUTOMATIC_UPDATES == true) {
+    Serial.println("[Automatic Updates]");
+    boolean update_required = check_updates_available();
+    if (update_required == true) {
+      set_rgb_led("blue");
+      Serial.println("Installing configuration update.");
+      automatic_update = true;
+      configuration_mode();
+      Serial.println("Installed configuration update successfully");
+      Serial.println("Restarting device to finish configuration Update.");
+      ESP.restart();
+    } else {
+      set_rgb_led("green");
+      automatic_update = false;
+    }
+  } else {
+    Serial.println("Automatically configuration updates are deactivated");
+    Serial.println("Please check if your device configuration is up to date");
+    automatic_update = false;  
+  }  
+}
+
+boolean check_updates_available () {
+  Serial.println("[Checking for configuration updates]");
+  String url_updates = String(path_updates) + "?" + "d_id=" + String(d_id) + "&d_pin=" + String(d_pin) + "&d_dev_mode=" + String(d_dev_mode) + "&d_status=" + String(d_status) + "&d_name=" + String(d_hostname) + "&d_baudrate=" + String(d_baudrate) + "&d_transmission=" + String(d_transmission) + "&d_automatic_updates=" + String(d_automatic_updates) + "&a_token=" + String(a_token);
+  client.connect(host, httpPort);
+  delay(SERVER_TIMEOUT);
+  if (!client.connect(host, httpPort)) {
+    Serial.println("connection failed");
+  }
+  Serial.print("Requesting URL: ");
+  Serial.println(url_updates);
+  client.print(String("GET ") + url_updates + " HTTP/1.1\r\n" + "Host: " + host + "\r\n" + "Connection: close\r\n\r\n"); // Daten werden per GET-Befehl an Server übergeben
+  
+  // Check HTTP status
+  char status[32] = {0};
+  client.readBytesUntil('\r', status, sizeof(status));
+  if (strcmp(status, "HTTP/1.1 200 OK") != 0) {
+    Serial.print(F("Unexpected response: "));
+    Serial.println(status);
+  }
+
+  // Skip HTTP headers
+  char endOfHeaders[] = "\r\n\r\n";
+  if (!client.find(endOfHeaders)) {
+    Serial.println(F("Invalid response"));
+  }
+  DynamicJsonDocument doc(128);
+  // Parse JSON object
+  DeserializationError error = deserializeJson(doc, client);
+  if (error) {
+    set_rgb_led("red");
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.c_str());
+    store_report("415","Es%20ist%20ein%20Fehler%20bei%20der%20Deserialisierung%20von%20JSON-Objekten%20aufgetreten.");
+    delay(DELAY_ALERT);
+  }
+  bool update_required = doc["update_required"];
+  if (update_required == true) {
+    Serial.println("Automatically detected new configuration update.");
+    return true;  
+  } else {
+    Serial.println("Currently their is no configuration update available.");
+    return false;  
+  }
 }
